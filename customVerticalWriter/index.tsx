@@ -39,6 +39,15 @@ const CHAR_REPLACEMENTS: Record<string, string> = {
     // "。": "︒",
 };
 
+const PROTECTED_DISCORD_SYNTAX_PATTERNS = [
+    /<a?:\w{2,32}:\d{17,20}>/,
+    /<@!?\d{17,20}>/,
+    /<@&\d{17,20}>/,
+    /<#\d{17,20}>/,
+    /<\/[^:\n>]+:\d{17,20}>/,
+    /<t:\d+(?::[tTdDfFR])?>/,
+];
+
 function isHalfWidthAscii(char: string) {
     const code = char.codePointAt(0);
     if (code == null) return false;
@@ -117,7 +126,13 @@ function getParagraphs(content: string) {
         .filter(Boolean);
 }
 
+function shouldBypassFormatting(content: string) {
+    return PROTECTED_DISCORD_SYNTAX_PATTERNS.some(pattern => pattern.test(content));
+}
+
 function transformContent(content: string) {
+    if (shouldBypassFormatting(content)) return content;
+
     const paragraphs = getParagraphs(content);
 
     if (!paragraphs.length) return content;
