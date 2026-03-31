@@ -187,7 +187,7 @@ const VerticalWriterToggle: ChatBarButtonFactory = ({ isMainChat }) => {
 export default definePlugin({
     name: "CustomVerticalWriter",
     description: "Formats outgoing messages into a right-to-left vertical layout when toggled on.",
-    authors: [{ name: "Custom", id: 0n }],
+    authors: [{ name: "956zs", id: 0n }],
     settings,
     chatBarButton: {
         icon: CandyCaneIcon,
