@@ -17,23 +17,30 @@ install.ps1
 
 ## Quick Install
 
-These scripts install the prebuilt custom Equicord release from:
+Canonical install entrypoints live in your Equicord fork:
+
+- Linux/macOS:
+  `https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.sh`
+- Windows PowerShell:
+  `https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.ps1`
+
+They install the latest rolling release from:
 
 - `https://github.com/956zs/Equicord/releases/latest`
-
-They use the official Equilotl installer underneath, but force it to patch with your custom `desktop.asar`.
 
 ### Equicord on Linux/macOS
 
 ```bash
-./quick-install.sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.sh)"
 ```
 
 ### Equicord on Windows PowerShell
 
 ```powershell
-.\quick-install.ps1
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.ps1 | iex"
 ```
+
+The local `quick-install.sh` and `quick-install.ps1` files in this repo are convenience wrappers around those same URLs.
 
 ## Source Install
 
