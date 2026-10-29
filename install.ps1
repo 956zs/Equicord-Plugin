@@ -1,24 +1,42 @@
+# Copy plugins from this repo into an Equicord/Vencord source checkout.
+# Usage: .\install.ps1 -TargetRepo C:\path\to\Equicord [-Plugins name1,name2]   (no -Plugins = all)
 param(
     [Parameter(Mandatory = $true)]
-    [string]$TargetRepo
+    [string]$TargetRepo,
+    [string[]]$Plugins
 )
 
+$ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TargetSrc = Join-Path $TargetRepo "src"
-$TargetPluginDir = Join-Path $TargetSrc "userplugins\customVerticalWriter"
 
 if (-not (Test-Path $TargetSrc)) {
     Write-Error "Target repo does not look like an Equicord/Vencord source checkout: $TargetRepo"
     exit 1
 }
 
-New-Item -ItemType Directory -Force -Path $TargetPluginDir | Out-Null
-Copy-Item -Force (Join-Path $ScriptDir "customVerticalWriter\index.tsx") (Join-Path $TargetPluginDir "index.tsx")
+if (-not $Plugins) {
+    $Plugins = Get-ChildItem -Directory $ScriptDir |
+        Where-Object { (Test-Path (Join-Path $_.FullName "index.ts")) -or (Test-Path (Join-Path $_.FullName "index.tsx")) } |
+        ForEach-Object { $_.Name }
+}
 
-Write-Host "Installed plugin into:"
-Write-Host "  $TargetPluginDir\index.tsx"
+$UserPlugins = Join-Path $TargetSrc "userplugins"
+New-Item -ItemType Directory -Force -Path $UserPlugins | Out-Null
+
+foreach ($Name in $Plugins) {
+    $Source = Join-Path $ScriptDir $Name
+    if (-not (Test-Path $Source)) {
+        Write-Error "Unknown plugin: $Name"
+        exit 1
+    }
+    $Dest = Join-Path $UserPlugins $Name
+    if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
+    Copy-Item -Recurse $Source $Dest
+    Write-Host "Installed $Name"
+}
+
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. cd `"$TargetRepo`""
-Write-Host "  2. pnpm build"
-Write-Host "  3. reload Discord (or run pnpm inject if this source build is not patched yet)"
+Write-Host "  cd `"$TargetRepo`"; pnpm build"
+Write-Host "  then reload Discord with Ctrl+R (run pnpm inject first if this build is not injected yet)"
