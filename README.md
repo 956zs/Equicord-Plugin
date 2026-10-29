@@ -1,156 +1,75 @@
-# Custom Vertical Writer
+# Equicord-Plugin
 
-Private/shareable `userplugin` for Equicord and Vencord.
+My `userplugins` for [Equicord](https://github.com/Equicord/Equicord) (they also work with Vencord).
 
-It adds a candy-cane toggle button to the Discord chat bar. When the toggle is on, outgoing messages are converted into your custom right-to-left vertical layout.
+## Plugins
 
-## Repo Layout
+| Plugin | What it does |
+| --- | --- |
+| [`customVerticalWriter`](./customVerticalWriter) | Adds a candy-cane toggle to the chat bar. When on, outgoing messages are converted into a right-to-left vertical layout. |
+| [`sessionRadar`](./sessionRadar) | Adds a button next to mute/deafen showing how many gateway sessions you have online. Click it for a native Discord menu listing each session (desktop / web / mobile / console, OS, status, activity, `ACTIVE` / `AFK`). Click a session to copy its ID. |
+| [`instantAfk`](./instantAfk) | Overrides the "push notification inactive timeout" locally. Discord's server clamps it to at least 1 minute; with this plugin the client can report AFK after any number of seconds, or immediately (`0`), so pushes go to your phone right away. |
 
-```text
-customVerticalWriter/
-  index.tsx
-quick-install.sh
-quick-install.ps1
-install.sh
-install.ps1
-```
+> `instantAfk` changes what your client reports to Discord. Client mods are against Discord's ToS; use at your own risk.
 
 ## Quick Install
 
-Canonical install entrypoints live in your Equicord fork:
+Clones (or updates) official Equicord, adds every plugin from this repo, builds and injects into Discord.
 
-- Linux/macOS:
-  `https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.sh`
-- Windows PowerShell:
-  `https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.ps1`
+Requirements: `git`, Node.js (with `pnpm` or `corepack`).
 
-They install the latest rolling release from:
-
-- `https://github.com/956zs/Equicord/releases/latest`
-
-### Equicord on Linux/macOS
+### Linux / macOS
 
 ```bash
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/956zs/Equicord-Plugin/main/quick-install.sh)"
 ```
 
-### Equicord on Windows PowerShell
+### Windows PowerShell
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/956zs/Equicord/main/misc/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/956zs/Equicord-Plugin/main/quick-install.ps1 | iex"
 ```
 
-The local `quick-install.sh` and `quick-install.ps1` files in this repo are convenience wrappers around those same URLs.
+- Equicord is cloned to `~/Equicord` (`%USERPROFILE%\Equicord` on Windows). Set `EQUICORD_DIR` to use another path.
+- `pnpm inject` asks which Discord install to patch.
+- Rerun the same command to update Equicord and the plugins.
+- Afterwards, fully restart Discord and enable the plugins in **Settings → Equicord → Plugins**.
 
-## Source Install
+## Manual Install
 
-### Equicord or Vencord on Linux/macOS
+If you already have an Equicord or Vencord source checkout:
 
 ```bash
-./install.sh /path/to/Equicord
-# or
-./install.sh /path/to/Vencord
+git clone https://github.com/956zs/Equicord-Plugin.git
+cd Equicord-Plugin
+./install.sh /path/to/Equicord                    # all plugins
+./install.sh /path/to/Equicord sessionRadar       # only some
 ```
-
-### Equicord or Vencord on Windows PowerShell
 
 ```powershell
-.\install.ps1 -TargetRepo "C:\Users\you\Documents\Equicord"
-# or
-.\install.ps1 -TargetRepo "C:\Users\you\Documents\Vencord"
+.\install.ps1 -TargetRepo "C:\path\to\Equicord"
+.\install.ps1 -TargetRepo "C:\path\to\Equicord" -Plugins sessionRadar,instantAfk
 ```
 
-The installer copies:
-
-```text
-customVerticalWriter/index.tsx
-```
-
-into:
-
-```text
-src/userplugins/customVerticalWriter/index.tsx
-```
-
-## Build After Install
-
-### Equicord
-
-Official docs say user plugins require a source build and must be rebuilt after adding or changing them.
+This copies the plugin folders into `src/userplugins/`. Then build:
 
 ```bash
-pnpm install --no-frozen-lockfile
-pnpm build
-pnpm inject
-```
-
-Use `pnpm build --watch` while developing for faster iteration, then reload Discord with `Ctrl+R`.
-
-### Vencord
-
-Official docs say custom plugins must live in `src/userplugins/` and you must rebuild after changes.
-
-```bash
+cd /path/to/Equicord
 pnpm install --frozen-lockfile
 pnpm build
-pnpm inject
+pnpm inject   # first time only
 ```
 
-For Vesktop, point `Vencord Location` to the `dist` folder of your Vencord source checkout and restart Vesktop after rebuilding.
+For Vesktop, point **Vencord Location** to the `dist` folder of your source checkout and restart Vesktop.
 
-## Update Workflow
+## Updating
 
-### If you only changed this plugin
+- **Plugin changes only:** rerun `install.sh`, then `pnpm build` and reload Discord with `Ctrl+R`. No need to inject again.
+- **Equicord upstream:** `git pull`, `pnpm install --frozen-lockfile`, `pnpm build`.
+- **Run `pnpm inject` again** when Discord updates (it installs into a new `app-x.y.z` folder and drops the patch), or after reinstalling Discord.
 
-- You do not need to `git pull` the whole Equicord/Vencord repo.
-- Rebuild the target client repo.
-- If you already injected that source build once, usually a rebuild plus Discord reload is enough for testing.
+## References
 
-### If you use the quick-install release flow
-
-- Push changes to `956zs/Equicord-Plugin`
-- The fork CI syncs the plugin into `956zs/Equicord`
-- The fork CI builds a fresh rolling release
-- Friends can rerun `quick-install.sh` or `quick-install.ps1`
-
-### If you want the latest Equicord/Vencord upstream changes
-
-- Yes, pull the target client repo:
-
-```bash
-git pull
-```
-
-- Then reinstall dependencies if needed and rebuild.
-
-Equicord:
-
-```bash
-pnpm install --no-frozen-lockfile
-pnpm build
-```
-
-Vencord:
-
-```bash
-pnpm install --frozen-lockfile
-pnpm build
-```
-
-### When do you need `pnpm inject` again?
-
-Usually only when:
-
-- it is your first install
-- Discord updated and removed the patch
-- you switched to a different Discord branch/install
-- the patched install broke or was reinstalled
-
-For normal plugin edits, `inject` is usually not needed every single time.
-
-## Official References
-
-- Equicord Plugins & Development: https://docs.equicord.org/plugins
-- Equicord Building from Source: https://docs.equicord.org/building-from-source
-- Vencord Installing custom plugins: https://docs.vencord.dev/installing/custom-plugins/
-- Vencord Installing from source: https://docs.vencord.dev/installing/
+- Equicord plugins & development: https://docs.equicord.org/plugins
+- Equicord building from source: https://docs.equicord.org/building-from-source
+- Vencord custom plugins: https://docs.vencord.dev/installing/custom-plugins/
