@@ -6,6 +6,7 @@ My `userplugins` for [Equicord](https://github.com/Equicord/Equicord) (they also
 
 | Plugin | What it does |
 | --- | --- |
+| [`alwaysTyping`](./alwaysTyping) | Adds a keyboard button to the chat bar. Turn it on in a channel and your typing indicator stays visible there (re-sent every 8 s, adjustable 3–9 s) until you turn it off. Not saved across reloads; stops by itself if you lack permission to type. |
 | [`customVerticalWriter`](./customVerticalWriter) | Adds a candy-cane toggle to the chat bar. When on, outgoing messages are converted into a right-to-left vertical layout. |
 | [`sessionRadar`](./sessionRadar) | Adds a button next to mute/deafen showing how many gateway sessions you have online. Click it for a native Discord menu listing each session (desktop / web / mobile / console, OS, status, activity, `ACTIVE` / `AFK`). Click a session to copy its ID. |
 | [`instantAfk`](./instantAfk) | Overrides the "push notification inactive timeout" locally. Discord's server clamps it to at least 1 minute; with this plugin the client can report AFK after any number of seconds, or immediately (`0`), so pushes go to your phone right away. |
