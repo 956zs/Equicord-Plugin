@@ -11,22 +11,7 @@ import { createAndAppendStyle } from "@utils/css";
 import definePlugin, { makeRange, OptionType } from "@utils/types";
 
 import { ColorSetting, ImageSetting } from "./components";
-
-// Same presets as lilypichu.theme.css: dark base, light base, and how far the
-// decoration images (drawn for the default red) turn to match
-export const PRESETS: Record<string, [dark: string, light: string, hueTurn: number]> = {
-    pink: ["#632d46", "#f766a8", -14],
-    red: ["#6e3f4a", "#fd8787", 0],
-    orange: ["#5e2e16", "#e6803d", 34],
-    yellow: ["#5d4a1f", "#fdd046", 56],
-    green: ["#2f4626", "#5e9846", 117],
-    cyan: ["#245150", "#41c7c1", -167],
-    blue: ["#1e305b", "#3e64c7", -124],
-    purple: ["#472a5e", "#9050b8", -73],
-};
-
-// Hue of the theme's default base color (#6e3f4a), which the decorations match
-const DEFAULT_HUE = 346;
+import { DEFAULT_HUE, PRESETS } from "./constants";
 
 export type ImageKind = "background" | "home";
 

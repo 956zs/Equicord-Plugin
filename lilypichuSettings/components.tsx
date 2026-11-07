@@ -10,7 +10,8 @@ import { Paragraph } from "@components/Paragraph";
 import { Margins } from "@utils/margins";
 import { ColorPicker, useState } from "@webpack/common";
 
-import { apply, getImageUrl, ImageKind, PRESETS, setImage, settings } from ".";
+import { apply, getImageUrl, ImageKind, setImage, settings } from ".";
+import { PRESETS } from "./constants";
 
 const suggestedColors = Object.values(PRESETS).map(([dark]) => dark);
 
