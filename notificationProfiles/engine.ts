@@ -13,7 +13,7 @@
 //   3. mark each item done or failed from the server's answer, save again
 // Restoring removes an item from the journal only once it is confirmed back.
 
-import { chunk, DmPrefs, GuildPrefs, Journal, matches, planRestore } from "./planner";
+import { chunk, type DmPrefs, type GuildPrefs, type Journal, matches, planRestore } from "./planner";
 
 export class HttpError extends Error {
     status: number | undefined;

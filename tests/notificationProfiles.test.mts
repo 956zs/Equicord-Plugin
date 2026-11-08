@@ -9,9 +9,11 @@ import assert from "node:assert/strict";
 
 // The plugin sources load as CommonJS here (no "type": "module"), so take the exports object
 import engine from "../notificationProfiles/engine";
+import flagMod from "../notificationProfiles/flag";
 import planner from "../notificationProfiles/planner";
 
 const { applyJournal, ATTEMPTS, HttpError, restoreJournal } = engine;
+const { canEnter, canLeave, encodeFlag, isForeignNote, parseFlag } = flagMod;
 const { diff, emptyJournal, FOCUS_DM, FOCUS_GUILD, isKept, matches, NOTIFY_NOTHING, parseIds, planFocus, planRestore, same } = planner;
 
 const set = (...v) => new Set(v);
@@ -264,6 +266,45 @@ await test("empty journal restore is a no-op", async () => {
     assert.equal(srv.requests, 0);
     assert.deepEqual(r.guilds, { ok: [], failed: [] });
     assert.equal(j.profile, "normal");
+});
+
+// ---------- cross-device flag ----------
+const phone = { device: "ph0ne123", label: "phone", at: "2026-11-08T13:40:00.000Z" };
+
+await test("flag round-trips through the note text", () => {
+    const note = encodeFlag(phone);
+    assert.ok(note.length <= 256);
+    assert.deepEqual(parseFlag(note), phone);
+    assert.deepEqual(parseFlag(encodeFlag({ ...phone, label: "my desktop pc" })).label, "my_desktop_pc");
+});
+
+await test("unrelated or broken notes are not flags", () => {
+    assert.equal(parseFlag(null), null);
+    assert.equal(parseFlag(""), null);
+    assert.equal(parseFlag("remember to buy milk"), null);
+    assert.equal(parseFlag("NP1 focus ph0ne123 phone not-a-date"), null);
+    assert.equal(parseFlag("NP1 focus"), null);
+    assert.equal(isForeignNote("remember to buy milk"), true);
+    assert.equal(isForeignNote(encodeFlag(phone)), false);
+    assert.equal(isForeignNote(""), false);
+});
+
+await test("only the device that turned focus on may turn it off", () => {
+    const note = encodeFlag(phone);
+    assert.deepEqual(canLeave(note, "ph0ne123"), { ok: true });
+    const d = canLeave(note, "desk0001");
+    assert.equal(d.ok, false);
+    assert.equal(d.reason, "otherDevice");
+    assert.equal(d.flag.label, "phone");
+    assert.deepEqual(canLeave(null, "desk0001"), { ok: true }, "no flag: local journal decides");
+});
+
+await test("another device cannot turn focus on over an active flag", () => {
+    const note = encodeFlag(phone);
+    assert.equal(canEnter(note, "desk0001").ok, false);
+    assert.deepEqual(canEnter(note, "ph0ne123"), { ok: true }, "same device may retry");
+    assert.deepEqual(canEnter(null, "desk0001"), { ok: true });
+    assert.equal(canEnter("my own note", "desk0001").reason, "foreignNote", "never overwrite a real note");
 });
 
 if (failures) { console.log(`\n${failures} failed`); process.exit(1); }

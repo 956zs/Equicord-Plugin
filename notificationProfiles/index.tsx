@@ -13,11 +13,14 @@ import { findComponentByCodeLazy } from "@webpack";
 import { ChannelStore, FluxDispatcher, GuildStore, Menu, Popout, RestAPI, showToast, useEffect, useReducer, useRef, UserGuildSettingsStore, UserStore } from "@webpack/common";
 
 import { applyJournal, Deps, HttpError, restoreJournal } from "./engine";
+import { canEnter, canLeave, Decision, encodeFlag, Flag, newDeviceId, parseFlag } from "./flag";
 import { DmInfo, DmPrefs, emptyJournal, GuildPrefs, isKept, Journal, matches, parseIds, planFocus } from "./planner";
 
 const PanelButton = findComponentByCodeLazy(".GREEN,positionKeyStemOverride:");
 
 const JOURNAL_KEY = "NotificationProfiles_journal";
+const DEVICE_KEY = "NotificationProfiles_device";
+const DEVICE_LABEL = "desktop";
 
 const settings = definePluginSettings({
     whitelist: {
@@ -47,6 +50,9 @@ const settings = definePluginSettings({
 // ---------- state ----------
 
 let journal: Journal = emptyJournal();
+let deviceId = "";
+/** Last known cross-device flag (the private note on your own account) */
+let sharedFlag: Flag | null = null;
 /** Last failures to show in the menu, by kind */
 let lastFailed: { guilds: string[]; channels: string[]; restoring: boolean; } = { guilds: [], channels: [], restoring: false };
 let busy = false;
@@ -59,7 +65,7 @@ function useProfileState() {
         listeners.add(bump);
         return () => void listeners.delete(bump);
     }, []);
-    return { journal, lastFailed, busy };
+    return { journal, lastFailed, busy, sharedFlag };
 }
 
 const whitelist = () => new Set(parseIds(settings.store.whitelist));
@@ -139,6 +145,56 @@ function storesLookStale() {
 
 const guildName = (id: string) => GuildStore.getGuild(id)?.name ?? id;
 
+// ---------- cross-device flag ----------
+
+const deviceName = (label: string) => ({ desktop: "電腦", phone: "手機" })[label] ?? label;
+const flagTime = (f: Flag) => new Date(f.at).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
+const noteUrl = () => `/users/@me/notes/${UserStore.getCurrentUser().id}`;
+
+async function readNote(): Promise<string | null> {
+    try {
+        const res: any = await RestAPI.get({ url: noteUrl() });
+        return res?.body?.note ?? null;
+    } catch (e: any) {
+        if (e?.status === 404) return null;
+        throw new Error(`讀不到同步旗標（HTTP ${e?.status ?? "?"}）`);
+    }
+}
+
+async function writeNote(note: string) {
+    try {
+        await RestAPI.put({ url: noteUrl(), body: { note } });
+    } catch (e: any) {
+        throw new Error(`寫不進同步旗標（HTTP ${e?.status ?? "?"}）`);
+    }
+}
+
+async function refreshFlag() {
+    try {
+        sharedFlag = parseFlag(await readNote());
+        emit();
+    } catch (e) {
+        console.warn("[NotificationProfiles]", e);
+    }
+}
+
+function refuse(d: Exclude<Decision, { ok: true; }>) {
+    showToast({
+        text: d.reason === "otherDevice"
+            ? `專注模式是${deviceName(d.flag.label)}在 ${flagTime(d.flag)} 開的，請到那台切換。那台資料不見的話，可以在這裡清除同步旗標`
+            : "你自己帳號的備註已經有別的內容，為了不蓋掉它，同步旗標用不了",
+        variant: "critical",
+    });
+}
+
+function clearFlag() {
+    return run(async () => {
+        await writeNote("");
+        sharedFlag = null;
+        showToast({ text: "已清除同步旗標", variant: "success" });
+    });
+}
+
 // ---------- switching ----------
 
 async function run(task: () => Promise<void>) {
@@ -178,6 +234,14 @@ function report(kind: "focus" | "normal", r: Awaited<ReturnType<typeof applyJour
 
 function enterFocus() {
     return run(async () => {
+        const note = await readNote();
+        const d = canEnter(note, deviceId);
+        if (!d.ok) return refuse(d);
+        // Claim Focus for this device before changing anything
+        if (!parseFlag(note)) {
+            sharedFlag = { device: deviceId, label: DEVICE_LABEL, at: new Date().toISOString() };
+            await writeNote(encodeFlag(sharedFlag));
+        }
         if (journal.profile !== "focus") {
             const dms = privateChannels();
             const guilds: Record<string, GuildPrefs> = {};
@@ -201,11 +265,19 @@ function enterFocus() {
 
 function leaveFocus() {
     return run(async () => {
+        const note = await readNote();
+        const d = canLeave(note, deviceId);
+        if (!d.ok) return refuse(d);
         if (storesLookStale()) {
             showToast({ text: "Discord 的設定畫面看起來還沒同步，為了不漏還原先停下來。按 Ctrl+R 重新載入後再切回一般模式", variant: "critical" });
             return;
         }
         report("normal", await restoreJournal(journal, deps));
+        // Release the flag only once everything is back
+        if (journal.profile === "normal" && parseFlag(note)) {
+            await writeNote("");
+            sharedFlag = null;
+        }
     });
 }
 
@@ -254,6 +326,13 @@ async function syncItems(guildIds: string[], channelIds: string[]) {
     }
 }
 
+// Another device changed the flag: Discord pushes note updates to every session
+function onNoteUpdate({ id, note }: { id?: string; note?: string; }) {
+    if (id !== UserStore.getCurrentUser()?.id) return;
+    sharedFlag = parseFlag(note);
+    emit();
+}
+
 function onChannelCreate({ channel }: { channel?: { id: string; }; }) {
     if (channel) syncItems([], [channel.id]).catch(e => console.error("[NotificationProfiles]", e));
 }
@@ -286,23 +365,28 @@ const pendingCount = (j: Journal) =>
     Object.values(j.guilds).filter(c => c.status !== "done").length + Object.values(j.channels).filter(c => c.status !== "done").length;
 
 function Bell({ className, width = 20, height = 20 }: { className?: string; width?: number; height?: number; }) {
-    const { journal: j, lastFailed: f } = useProfileState();
+    const { journal: j, lastFailed: f, sharedFlag: flag } = useProfileState();
     const warn = pendingCount(j) > 0 || (f.restoring && (f.guilds.length || f.channels.length));
+    // Focus on any device shows the slashed bell
+    const focusAnywhere = j.profile === "focus" || flag != null;
     return (
         <svg className={className} width={width} height={height} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
             <path d={BELL} />
-            {j.profile === "focus" && <path d={SLASH} />}
+            {focusAnywhere && <path d={SLASH} />}
             {warn && <circle cx="19" cy="5" r="4" fill="var(--status-danger, #f23f43)" />}
         </svg>
     );
 }
 
 function ProfileMenu({ onClose }: { onClose(): void; }) {
-    const { journal: j, lastFailed: f, busy: isBusy } = useProfileState();
+    const { journal: j, lastFailed: f, busy: isBusy, sharedFlag: flag } = useProfileState();
     const { whitelist: wlText, excludedGuilds: exText } = settings.use(["whitelist", "excludedGuilds"]);
     const wl = parseIds(wlText);
     const ex = parseIds(exText);
-    const focus = j.profile === "focus";
+    const elsewhere = flag != null && flag.device !== deviceId ? flag : null;
+    const focus = j.profile === "focus" || elsewhere != null;
+
+    useEffect(() => void refreshFlag(), []);
     const failedNames = f.guilds.slice(0, 5).map(guildName);
     const leftovers = focus ? pendingCount(j) : 0;
 
@@ -313,20 +397,34 @@ function ProfileMenu({ onClose }: { onClose(): void; }) {
                     group="vc-nprof"
                     id="vc-nprof-normal"
                     label="一般模式"
-                    subtext={focus ? "把專注模式改過的設定還原" : "照 Discord 原本的通知設定"}
+                    subtext={elsewhere
+                        ? `要在${deviceName(elsewhere.label)}切回`
+                        : focus ? "把專注模式改過的設定還原" : "照 Discord 原本的通知設定"}
                     checked={!focus}
-                    disabled={isBusy}
+                    disabled={isBusy || elsewhere != null}
                     action={leaveFocus}
                 />
                 <Menu.MenuRadioItem
                     group="vc-nprof"
                     id="vc-nprof-focus"
-                    label="專注模式"
-                    subtext={`只通知白名單的 ${wl.length} 個人的私訊`}
+                    label={elsewhere ? `專注模式（${deviceName(elsewhere.label)}開的）` : "專注模式"}
+                    subtext={elsewhere
+                        ? `${flagTime(elsewhere)} 在${deviceName(elsewhere.label)}開的`
+                        : `只通知白名單的 ${wl.length} 個人的私訊`}
                     checked={focus}
-                    disabled={isBusy}
+                    disabled={isBusy || elsewhere != null}
                     action={enterFocus}
                 />
+                {elsewhere && (
+                    <Menu.MenuItem
+                        id="vc-nprof-clear-flag"
+                        label="清除同步旗標"
+                        subtext={`只有${deviceName(elsewhere.label)}的資料不見時才需要；不會改任何通知設定`}
+                        color="danger"
+                        disabled={isBusy}
+                        action={clearFlag}
+                    />
+                )}
             </Menu.MenuGroup>
 
             {(f.guilds.length > 0 || f.channels.length > 0 || leftovers > 0) && (
@@ -448,12 +546,17 @@ export default definePlugin({
 
     async start() {
         journal = (await DataStore.get<Journal>(JOURNAL_KEY)) ?? emptyJournal();
+        deviceId = (await DataStore.get<string>(DEVICE_KEY)) ?? newDeviceId();
+        await DataStore.set(DEVICE_KEY, deviceId);
         emit();
         FluxDispatcher.subscribe("CHANNEL_CREATE", onChannelCreate);
+        FluxDispatcher.subscribe("USER_NOTE_UPDATE", onNoteUpdate);
+        refreshFlag();
     },
 
     stop() {
         FluxDispatcher.unsubscribe("CHANNEL_CREATE", onChannelCreate);
+        FluxDispatcher.unsubscribe("USER_NOTE_UPDATE", onNoteUpdate);
         listeners = new Set();
     },
 });
