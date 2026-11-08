@@ -97,6 +97,7 @@ async function patch(url: string, body: object) {
         const res: any = await RestAPI.patch({ url, body });
         return res?.body;
     } catch (e: any) {
+        console.warn("[NotificationProfiles] PATCH", url, "failed:", e?.status, JSON.stringify(e?.body ?? e?.message ?? e).slice(0, 500));
         throw new HttpError(typeof e?.status === "number" ? e.status : undefined, e?.body?.retry_after);
     }
 }

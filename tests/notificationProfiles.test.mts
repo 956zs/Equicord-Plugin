@@ -12,7 +12,7 @@ import engine from "../notificationProfiles/engine";
 import planner from "../notificationProfiles/planner";
 
 const { applyJournal, ATTEMPTS, HttpError, restoreJournal } = engine;
-const { diff, emptyJournal, FOCUS_DM, FOCUS_GUILD, isKept, matches, parseIds, planFocus, planRestore } = planner;
+const { diff, emptyJournal, FOCUS_DM, FOCUS_GUILD, isKept, matches, NOTIFY_NOTHING, parseIds, planFocus, planRestore, same } = planner;
 
 const set = (...v) => new Set(v);
 const normalGuild = (o = {}) => ({ muted: false, mute_config: null, mobile_push: true, message_notifications: 1, suppress_everyone: false, suppress_roles: false, ...o });
@@ -38,6 +38,8 @@ function fakeServer({ guilds = {}, dms = {} } = {}) {
     srv.deps = {
         async patchGuilds(batch) {
             answer();
+            for (const f of Object.values(batch))
+                if ("message_notifications" in f && ![0, 1, 2].includes(f.message_notifications)) throw new HttpError(400);
             for (const id of Object.keys(batch)) if (srv.failGuild.has(id)) throw new HttpError(400);
             const body = [];
             for (const [id, f] of Object.entries(batch)) {
@@ -49,7 +51,9 @@ function fakeServer({ guilds = {}, dms = {} } = {}) {
         async patchDms(overrides) {
             answer();
             for (const [id, f] of Object.entries(overrides)) Object.assign(srv.dms[id], f);
-            return { channel_overrides: Object.entries(srv.dms).map(([channel_id, v]) => ({ channel_id, ...v })) };
+            // Discord answers mute_config keys in the other order
+            const flip = c => c && { end_time: c.end_time, selected_time_window: c.selected_time_window };
+            return { channel_overrides: Object.entries(srv.dms).map(([channel_id, v]) => ({ channel_id, ...v, mute_config: flip(v.mute_config) })) };
         },
         currentGuild: id => srv.guilds[id] ?? null,
         currentDm: id => srv.dms[id] ?? null,
@@ -89,7 +93,7 @@ await test("diff keeps only changed fields with their old values", () => {
     const d = diff(normalGuild({ muted: true }), FOCUS_GUILD);
     assert.equal("muted" in d.next, false);
     assert.equal(d.prev.mobile_push, true);
-    assert.equal(d.next.message_notifications, 3);
+    assert.equal(d.next.message_notifications, 2);
 });
 
 await test("focus plan: whitelist kept, group DMs muted, excluded server untouched", () => {
@@ -116,6 +120,17 @@ await test("restore plan skips fields changed by hand during focus", () => {
     const p = planRestore(j, id => now[id], () => null);
     assert.equal("muted" in p.guilds.g1, false);
     assert.equal(p.guilds.g1.mobile_push, true);
+});
+
+await test("same() ignores key order", () => {
+    assert.ok(same({ selected_time_window: -1, end_time: null }, { end_time: null, selected_time_window: -1 }));
+    assert.ok(!same({ a: 1 }, { a: 2 }));
+    assert.ok(same(null, undefined));
+});
+
+await test("focus uses Discord's 'nothing' value (2)", () => {
+    assert.equal(NOTIFY_NOTHING, 2);
+    assert.equal(FOCUS_GUILD.message_notifications, 2);
 });
 
 await test("parseIds", () => {
@@ -231,6 +246,15 @@ await test("restore leaves alone what the user changed by hand", async () => {
     await restoreJournal(j, srv.deps);
     assert.equal(srv.guilds.g1.message_notifications, 0, "hand change kept");
     assert.equal(srv.guilds.g1.mobile_push, true, "untouched focus field restored");
+});
+
+await test("DMs confirmed even when Discord reorders mute_config keys", async () => {
+    const s = scenario();
+    const srv = fakeServer(s);
+    const j = planFor(s);
+    const r = await applyJournal(j, srv.deps);
+    assert.deepEqual(r.channels.failed, []);
+    assert.deepEqual(r.channels.ok.sort(), ["c2", "c3"]);
 });
 
 await test("empty journal restore is a no-op", async () => {

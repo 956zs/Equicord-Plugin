@@ -30,8 +30,8 @@ export interface DmPrefs {
     mute_config: MuteConfig | null;
 }
 
-/** 3 = "Nothing": no notifications, not even direct mentions */
-export const NOTIFY_NOTHING = 3;
+/** UserNotificationSetting: 0 all, 1 only mentions, 2 nothing (no notifications, not even direct mentions) */
+export const NOTIFY_NOTHING = 2;
 
 const FOREVER: MuteConfig = { selected_time_window: -1, end_time: null };
 
@@ -70,7 +70,15 @@ export interface Journal {
 
 export const emptyJournal = (): Journal => ({ profile: "normal", guilds: {}, channels: {} });
 
-const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+// Deep equality that ignores key order: Discord answers mute_config as
+// {end_time, selected_time_window}, the other way round from what is sent
+function canonical(v: unknown): unknown {
+    if (Array.isArray(v)) return v.map(canonical);
+    if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map(k => [k, canonical((v as any)[k])]));
+    return v ?? null;
+}
+
+export const same = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
 /** The fields of `target` that differ from `current`, with their old values */
 export function diff<T extends object>(current: T, target: Partial<T>): Change<T> | null {
