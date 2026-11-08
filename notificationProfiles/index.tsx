@@ -464,7 +464,7 @@ function ProfileMenu({ onClose }: { onClose(): void; }) {
                 ))}
             </Menu.MenuGroup>
 
-            {focus && (
+            {j.profile === "focus" && (
                 <>
                     <Menu.MenuSeparator />
                     <Menu.MenuItem
