@@ -12,9 +12,11 @@ import definePlugin, { OptionType } from "@utils/types";
 import { findComponentByCodeLazy } from "@webpack";
 import { ChannelStore, FluxDispatcher, GuildStore, Menu, Popout, RestAPI, showToast, useEffect, useReducer, useRef, UserGuildSettingsStore, UserStore } from "@webpack/common";
 
-import { applyJournal, Deps, HttpError, restoreJournal } from "./engine";
-import { canEnter, canLeave, Decision, encodeFlag, Flag, newDeviceId, parseFlag } from "./flag";
-import { DmInfo, DmPrefs, emptyJournal, GuildPrefs, isKept, Journal, matches, parseIds, planFocus } from "./planner";
+import * as controller from "./controller";
+import { HttpError, type Result } from "./engine";
+import { type Flag, isShared, newDeviceId, parseFlag } from "./flag";
+import { type DmInfo, type DmPrefs, emptyJournal, FOCUS_DM, type GuildPrefs, type Journal, parseIds } from "./planner";
+import { SYNC_CHANNEL_NAME } from "./sync";
 
 const PanelButton = findComponentByCodeLazy(".GREEN,positionKeyStemOverride:");
 
@@ -49,10 +51,13 @@ const settings = definePluginSettings({
 
 // ---------- state ----------
 
-let journal: Journal = emptyJournal();
+/** This device's copy of the journal (the shared one lives in the sync channel) */
+let local: controller.LocalState = { journal: emptyJournal() };
 let deviceId = "";
 /** Last known cross-device flag (the private note on your own account) */
 let sharedFlag: Flag | null = null;
+/** The shared journal of the current flag could not be read last time */
+let journalLost = false;
 /** Last failures to show in the menu, by kind */
 let lastFailed: { guilds: string[]; channels: string[]; restoring: boolean; } = { guilds: [], channels: [], restoring: false };
 let busy = false;
@@ -65,7 +70,7 @@ function useProfileState() {
         listeners.add(bump);
         return () => void listeners.delete(bump);
     }, []);
-    return { journal, lastFailed, busy, sharedFlag };
+    return { journal: local.journal, lastFailed, busy, sharedFlag, journalLost };
 }
 
 const whitelist = () => new Set(parseIds(settings.store.whitelist));
@@ -92,60 +97,47 @@ function currentDm(id: string): DmPrefs | null {
     return { muted: s.isChannelMuted(null, id), mute_config: s.getChannelMuteConfig(null, id) ?? null };
 }
 
+/** A group DM with nobody else in it, like the sync channel: never worth muting */
+const isSolo = (c: any) => c.type === 3 && !c.recipients?.length;
+
 function privateChannels(): DmInfo[] {
     return (ChannelStore.getSortedPrivateChannels() as any[])
-        .filter(c => c.type === 1 || c.type === 3)
+        .filter(c => (c.type === 1 || c.type === 3) && !isSolo(c))
         .map(c => ({ id: c.id as string, type: c.type as number, recipients: (c.recipients ?? []) as string[] }));
 }
 
-async function patch(url: string, body: object) {
+async function rest(method: "get" | "post" | "patch" | "del", url: string, options: { body?: object; query?: object; } = {}) {
     try {
-        const res: any = await RestAPI.patch({ url, body });
+        const res: any = await RestAPI[method]({ url, ...options });
         return res?.body;
     } catch (e: any) {
-        console.warn("[NotificationProfiles] PATCH", url, "failed:", e?.status, JSON.stringify(e?.body ?? e?.message ?? e).slice(0, 500));
+        console.warn("[NotificationProfiles]", method.toUpperCase(), url, "failed:", e?.status, JSON.stringify(e?.body ?? e?.message ?? e).slice(0, 500));
         throw new HttpError(typeof e?.status === "number" ? e.status : undefined, e?.body?.retry_after);
     }
 }
 
 // The requests go out directly (Discord's own helpers do not wait for the
 // server), then the local stores get the same update Discord dispatches
-const deps: Deps = {
+const deps: controller.Platform["deps"] = {
     async patchGuilds(batch) {
-        const body = await patch("/users/@me/guilds/settings", { guilds: batch });
+        const body = await rest("patch", "/users/@me/guilds/settings", { body: { guilds: batch } });
         for (const [guildId, settings] of Object.entries(batch))
             FluxDispatcher.dispatch({ type: "USER_GUILD_SETTINGS_GUILD_UPDATE", guildId, settings });
         return body;
     },
     async patchDms(overrides) {
-        const body = await patch("/users/@me/guilds/@me/settings", { channel_overrides: overrides });
+        const body = await rest("patch", "/users/@me/guilds/@me/settings", { body: { channel_overrides: overrides } });
         FluxDispatcher.dispatch({ type: "USER_GUILD_SETTINGS_CHANNEL_UPDATE_BULK", guildId: null, overrides });
         return body;
     },
     currentGuild,
     currentDm,
-    save: async j => {
-        await DataStore.set(JOURNAL_KEY, j);
-        emit();
-    },
     sleep: ms => new Promise(r => setTimeout(r, ms)),
 };
 
-/**
- * Restoring trusts the local stores to show what the server has. If most
- * confirmed changes look untouched there, the stores are stale (the local
- * update did not apply): stop rather than skip everything.
- */
-function storesLookStale() {
-    const done = Object.entries(journal.guilds).filter(([, c]) => c.status === "done");
-    if (done.length < 3) return false;
-    const stale = done.filter(([id, c]) => matches(currentGuild(id), c.prev)).length;
-    return stale / done.length > 0.5;
-}
-
 const guildName = (id: string) => GuildStore.getGuild(id)?.name ?? id;
 
-// ---------- cross-device flag ----------
+// ---------- cross-device flag and shared journal ----------
 
 const deviceName = (label: string) => ({ desktop: "電腦", phone: "手機" })[label] ?? label;
 const flagTime = (f: Flag) => new Date(f.at).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
@@ -154,7 +146,7 @@ const noteUrl = () => `/users/@me/notes/${UserStore.getCurrentUser().id}`;
 async function readNote(): Promise<string | null> {
     try {
         const res: any = await RestAPI.get({ url: noteUrl() });
-        return res?.body?.note ?? null;
+        return res?.body?.note || null;
     } catch (e: any) {
         if (e?.status === 404) return null;
         throw new Error(`讀不到同步旗標（HTTP ${e?.status ?? "?"}）`);
@@ -169,30 +161,68 @@ async function writeNote(note: string) {
     }
 }
 
+/** The group DM with only you that holds the shared journal; made on first use */
+async function syncChannel(): Promise<string> {
+    const me = UserStore.getCurrentUser().id;
+    const found = (ChannelStore.getSortedPrivateChannels() as any[])
+        .find(c => isSolo(c) && c.ownerId === me && c.name === SYNC_CHANNEL_NAME);
+    if (found) return found.id;
+    const { id } = await rest("post", "/users/@me/channels", { body: { recipients: [] } });
+    await rest("patch", `/channels/${id}`, { body: { name: SYNC_CHANNEL_NAME } });
+    await deps.patchDms({ [id]: FOCUS_DM });
+    return id;
+}
+
+const platform: controller.Platform = {
+    get deviceId() { return deviceId; },
+    deviceLabel: DEVICE_LABEL,
+    deps,
+    guildIds: () => Object.keys(GuildStore.getGuilds()),
+    privateChannels,
+    options: () => ({
+        whitelist: whitelist(),
+        excluded: excluded(),
+        muteServers: settings.store.muteServers,
+        muteGroupDMs: settings.store.muteGroupDMs,
+    }),
+    readNote,
+    writeNote,
+    syncChannel,
+    async listMessages(channelId) {
+        const body = await rest("get", `/channels/${channelId}/messages`, { query: { limit: 100 } });
+        return (Array.isArray(body) ? body : []).map((m: any) => ({ id: String(m.id), content: String(m.content ?? "") }));
+    },
+    async sendMessage(channelId, content) {
+        // 4096: sent without a notification
+        await rest("post", `/channels/${channelId}/messages`, { body: { content, flags: 4096 } });
+    },
+    async deleteMessage(channelId, messageId) {
+        await rest("del", `/channels/${channelId}/messages/${messageId}`);
+    },
+    loadLocal: () => JSON.parse(JSON.stringify(local)),
+    async saveLocal(state) {
+        local = state;
+        await DataStore.set(JOURNAL_KEY, state);
+        emit();
+    },
+    now: () => Date.now(),
+};
+
+function setFlag(note: string | null) {
+    const flag = parseFlag(note);
+    if (flag?.journal !== sharedFlag?.journal) journalLost = false;
+    sharedFlag = flag;
+    emit();
+}
+
 async function refreshFlag() {
     try {
-        sharedFlag = parseFlag(await readNote());
-        emit();
+        const note = await readNote();
+        setFlag(note);
+        if (!busy) await controller.reconcile(platform, note);
     } catch (e) {
         console.warn("[NotificationProfiles]", e);
     }
-}
-
-function refuse(d: Exclude<Decision, { ok: true; }>) {
-    showToast({
-        text: d.reason === "otherDevice"
-            ? `專注模式是${deviceName(d.flag.label)}在 ${flagTime(d.flag)} 開的，請到那台切換。那台資料不見的話，可以在這裡清除同步旗標`
-            : "你自己帳號的備註已經有別的內容，為了不蓋掉它，同步旗標用不了",
-        variant: "critical",
-    });
-}
-
-function clearFlag() {
-    return run(async () => {
-        await writeNote("");
-        sharedFlag = null;
-        showToast({ text: "已清除同步旗標", variant: "success" });
-    });
 }
 
 // ---------- switching ----------
@@ -209,132 +239,77 @@ async function run(task: () => Promise<void>) {
     } finally {
         busy = false;
         emit();
+        await refreshFlag();
     }
 }
 
-function report(kind: "focus" | "normal", r: Awaited<ReturnType<typeof applyJournal>>) {
+function report(kind: "focus" | "normal", r: { guilds: Result; channels: Result; }, syncError?: string) {
     const failedG = r.guilds.failed;
     const failedC = r.channels.failed;
     lastFailed = { guilds: failedG, channels: failedC, restoring: kind === "normal" };
+    const sync = syncError ? `。同步頻道的紀錄沒更新（${syncError}）` : "";
     if (!failedG.length && !failedC.length) {
         showToast({
-            text: kind === "focus"
+            text: (kind === "focus"
                 ? `專注模式：改了 ${r.guilds.ok.length} 個伺服器、${r.channels.ok.length} 個私訊`
-                : `一般模式：還原了 ${r.guilds.ok.length} 個伺服器、${r.channels.ok.length} 個私訊`,
-            variant: "success",
+                : `一般模式：還原了 ${r.guilds.ok.length} 個伺服器、${r.channels.ok.length} 個私訊`) + sync,
+            variant: syncError ? "critical" : "success",
         });
     } else {
         const names = failedG.slice(0, 3).map(guildName).join("、");
         showToast({
-            text: `${kind === "focus" ? "有些沒改成功" : "有些沒還原"}：${failedG.length} 個伺服器${names ? `（${names}…）` : ""}、${failedC.length} 個私訊。點鈴鐺重試`,
+            text: `${kind === "focus" ? "有些沒改成功" : "有些沒還原"}：${failedG.length} 個伺服器${names ? `（${names}…）` : ""}、${failedC.length} 個私訊。點鈴鐺重試${sync}`,
             variant: "critical",
         });
     }
 }
 
-function enterFocus() {
+function show(o: controller.Outcome) {
+    const fail = (text: string) => showToast({ text, variant: "critical" });
+    switch (o.kind) {
+        case "applied":
+            return report("focus", o.result, o.syncError);
+        case "restored":
+            return report("normal", o.result, o.syncError);
+        case "already-normal":
+            lastFailed = { guilds: [], channels: [], restoring: false };
+            return showToast({ text: "已經是一般模式", variant: "success" });
+        case "other-device":
+            return fail(`專注模式是${deviceName(o.flag.label)}在 ${flagTime(o.flag)} 開的，請到那台切換。那台資料不見的話，可以在這裡清除同步旗標`);
+        case "foreign-note":
+            return fail("你自己帳號的備註已經有別的內容，為了不蓋掉它，同步旗標用不了");
+        case "stale-stores":
+            return fail("Discord 的設定畫面看起來還沒同步，為了不漏還原先停下來。按 Ctrl+R 重新載入後再切回一般模式");
+        case "journal-unreadable":
+            journalLost = true;
+            return fail(`讀不到同步頻道裡的紀錄（${o.error}），沒有改任何設定。到開專注模式的那台切回一般模式；那台的資料也不見了的話，才清除同步旗標`);
+        case "unrestored":
+            return fail("上次的專注模式還有設定沒還原，先切回一般模式再開");
+    }
+}
+
+const enterFocus = () => run(async () => show(await controller.enter(platform)));
+const leaveFocus = () => run(async () => show(await controller.leave(platform)));
+
+function clearFlag() {
     return run(async () => {
-        const note = await readNote();
-        const d = canEnter(note, deviceId);
-        if (!d.ok) return refuse(d);
-        // Claim Focus for this device before changing anything
-        if (!parseFlag(note)) {
-            sharedFlag = { device: deviceId, label: DEVICE_LABEL, at: new Date().toISOString() };
-            await writeNote(encodeFlag(sharedFlag));
-        }
-        if (journal.profile !== "focus") {
-            const dms = privateChannels();
-            const guilds: Record<string, GuildPrefs> = {};
-            for (const id of Object.keys(GuildStore.getGuilds())) {
-                const cur = currentGuild(id);
-                if (cur) guilds[id] = cur;
-            }
-            journal = planFocus({
-                guilds,
-                dms: dms.map(info => ({ info, prefs: currentDm(info.id)! })).filter(d => d.prefs),
-                whitelist: whitelist(),
-                excludedGuilds: excluded(),
-                muteServers: settings.store.muteServers,
-                muteGroupDMs: settings.store.muteGroupDMs,
-            });
-        }
-        // also retries anything that failed last time
-        report("focus", await applyJournal(journal, deps));
+        await controller.clearFlag(platform);
+        showToast({ text: "已清除同步旗標", variant: "success" });
     });
 }
 
-function leaveFocus() {
-    return run(async () => {
-        const note = await readNote();
-        const d = canLeave(note, deviceId);
-        if (!d.ok) return refuse(d);
-        if (storesLookStale()) {
-            showToast({ text: "Discord 的設定畫面看起來還沒同步，為了不漏還原先停下來。按 Ctrl+R 重新載入後再切回一般模式", variant: "critical" });
-            return;
-        }
-        report("normal", await restoreJournal(journal, deps));
-        // Release the flag only once everything is back
-        if (journal.profile === "normal" && parseFlag(note)) {
-            await writeNote("");
-            sharedFlag = null;
-        }
-    });
-}
-
-/** Applies or restores single items while Focus is on (whitelist / exclusion edits, new DMs) */
-async function syncItems(guildIds: string[], channelIds: string[]) {
-    if (journal.profile !== "focus") return;
-    const wl = whitelist();
-    const ex = excluded();
-    const sub: Journal = { profile: "focus", guilds: {}, channels: {} };
-    const toRestore: Journal = { profile: "focus", guilds: {}, channels: {} };
-
-    for (const id of guildIds) {
-        const cur = currentGuild(id);
-        if (!cur) continue;
-        if (ex.has(id)) {
-            if (journal.guilds[id]) toRestore.guilds[id] = journal.guilds[id];
-        } else if (settings.store.muteServers && !journal.guilds[id]) {
-            Object.assign(sub.guilds, planFocus({ guilds: { [id]: cur }, dms: [], whitelist: wl, excludedGuilds: ex, muteServers: true, muteGroupDMs: true }).guilds);
-        }
-    }
-    for (const id of channelIds) {
-        const ch: any = ChannelStore.getChannel(id);
-        const cur = currentDm(id);
-        if (!ch || !cur || (ch.type !== 1 && ch.type !== 3)) continue;
-        const info: DmInfo = { id, type: ch.type, recipients: ch.recipients ?? [] };
-        if (isKept(info, wl, settings.store.muteGroupDMs)) {
-            if (journal.channels[id]) toRestore.channels[id] = journal.channels[id];
-        } else if (!journal.channels[id]) {
-            Object.assign(sub.channels, planFocus({ guilds: {}, dms: [{ info, prefs: cur }], whitelist: wl, excludedGuilds: ex, muteServers: false, muteGroupDMs: settings.store.muteGroupDMs }).channels);
-        }
-    }
-
-    const restoreGuilds = Object.keys(toRestore.guilds);
-    const restoreChannels = Object.keys(toRestore.channels);
-    if (restoreGuilds.length || restoreChannels.length) {
-        // restoreJournal drops what it put back from toRestore; mirror that in the main journal
-        await restoreJournal(toRestore, { ...deps, save: async () => { } });
-        for (const id of restoreGuilds) if (!toRestore.guilds[id]) delete journal.guilds[id];
-        for (const id of restoreChannels) if (!toRestore.channels[id]) delete journal.channels[id];
-        await deps.save(journal);
-    }
-    if (Object.keys(sub.guilds).length || Object.keys(sub.channels).length) {
-        Object.assign(journal.guilds, sub.guilds);
-        Object.assign(journal.channels, sub.channels);
-        await applyJournal(journal, deps);
-    }
-}
+const syncItems = (guildIds: string[], channelIds: string[]) =>
+    controller.syncItems(platform, guildIds, channelIds).catch(e => console.error("[NotificationProfiles]", e));
 
 // Another device changed the flag: Discord pushes note updates to every session
 function onNoteUpdate({ id, note }: { id?: string; note?: string; }) {
     if (id !== UserStore.getCurrentUser()?.id) return;
-    sharedFlag = parseFlag(note);
-    emit();
+    setFlag(note || null);
+    if (!busy) controller.reconcile(platform, note || null).catch(e => console.error("[NotificationProfiles]", e));
 }
 
 function onChannelCreate({ channel }: { channel?: { id: string; }; }) {
-    if (channel) syncItems([], [channel.id]).catch(e => console.error("[NotificationProfiles]", e));
+    if (channel && !busy) syncItems([], [channel.id]);
 }
 
 function toggleId(key: "whitelist" | "excludedGuilds", id: string) {
@@ -348,12 +323,12 @@ function toggleId(key: "whitelist" | "excludedGuilds", id: string) {
 function toggleWhitelist(userId: string) {
     toggleId("whitelist", userId);
     const dmId = ChannelStore.getDMFromUserId(userId);
-    if (dmId) syncItems([], [dmId]).catch(e => console.error("[NotificationProfiles]", e));
+    if (dmId) syncItems([], [dmId]);
 }
 
 function toggleExcluded(guildId: string) {
     toggleId("excludedGuilds", guildId);
-    syncItems([guildId], []).catch(e => console.error("[NotificationProfiles]", e));
+    syncItems([guildId], []);
 }
 
 // ---------- UI ----------
@@ -379,12 +354,14 @@ function Bell({ className, width = 20, height = 20 }: { className?: string; widt
 }
 
 function ProfileMenu({ onClose }: { onClose(): void; }) {
-    const { journal: j, lastFailed: f, busy: isBusy, sharedFlag: flag } = useProfileState();
+    const { journal: j, lastFailed: f, busy: isBusy, sharedFlag: flag, journalLost: lost } = useProfileState();
     const { whitelist: wlText, excludedGuilds: exText } = settings.use(["whitelist", "excludedGuilds"]);
     const wl = parseIds(wlText);
     const ex = parseIds(exText);
     const elsewhere = flag != null && flag.device !== deviceId ? flag : null;
-    const focus = j.profile === "focus" || elsewhere != null;
+    // A shared journal can be restored from here; a v1 flag only on its own device
+    const lockedElsewhere = elsewhere != null && !isShared(elsewhere);
+    const focus = j.profile === "focus" || flag != null;
 
     useEffect(() => void refreshFlag(), []);
     const failedNames = f.guilds.slice(0, 5).map(guildName);
@@ -397,11 +374,12 @@ function ProfileMenu({ onClose }: { onClose(): void; }) {
                     group="vc-nprof"
                     id="vc-nprof-normal"
                     label="一般模式"
-                    subtext={elsewhere
+                    subtext={lockedElsewhere
                         ? `要在${deviceName(elsewhere.label)}切回`
-                        : focus ? "把專注模式改過的設定還原" : "照 Discord 原本的通知設定"}
+                        : elsewhere ? `在這裡還原${deviceName(elsewhere.label)}開的專注模式`
+                            : focus ? "把專注模式改過的設定還原" : "照 Discord 原本的通知設定"}
                     checked={!focus}
-                    disabled={isBusy || elsewhere != null}
+                    disabled={isBusy || lockedElsewhere}
                     action={leaveFocus}
                 />
                 <Menu.MenuRadioItem
@@ -415,7 +393,7 @@ function ProfileMenu({ onClose }: { onClose(): void; }) {
                     disabled={isBusy || elsewhere != null}
                     action={enterFocus}
                 />
-                {elsewhere && (
+                {elsewhere && (lockedElsewhere || lost) && (
                     <Menu.MenuItem
                         id="vc-nprof-clear-flag"
                         label="清除同步旗標"
@@ -481,7 +459,7 @@ function ProfileMenu({ onClose }: { onClose(): void; }) {
 
 function ProfileButton(props: UserAreaRenderProps) {
     const buttonRef = useRef<HTMLDivElement | null>(null);
-    const { journal: j } = useProfileState();
+    const { journal: j, sharedFlag: flag } = useProfileState();
     return (
         <Popout
             position="top"
@@ -492,7 +470,7 @@ function ProfileButton(props: UserAreaRenderProps) {
             {popoutProps => (
                 <PanelButton
                     ref={buttonRef}
-                    tooltipText={props?.hideTooltips ? void 0 : `通知設定檔：${j.profile === "focus" ? "專注模式" : "一般模式"}`}
+                    tooltipText={props?.hideTooltips ? void 0 : `通知設定檔：${j.profile === "focus" || flag ? "專注模式" : "一般模式"}`}
                     icon={Bell}
                     plated={props?.nameplate != null}
                     onClick={popoutProps.onClick}
@@ -545,7 +523,9 @@ export default definePlugin({
     },
 
     async start() {
-        journal = (await DataStore.get<Journal>(JOURNAL_KEY)) ?? emptyJournal();
+        // Older versions stored the bare journal
+        const saved = await DataStore.get<controller.LocalState | Journal>(JOURNAL_KEY);
+        local = saved && "journal" in saved ? saved : { journal: (saved as Journal | undefined) ?? emptyJournal() };
         deviceId = (await DataStore.get<string>(DEVICE_KEY)) ?? newDeviceId();
         await DataStore.set(DEVICE_KEY, deviceId);
         emit();
